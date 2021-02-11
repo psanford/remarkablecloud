@@ -336,6 +336,58 @@ func (c *Client) Mkdir(p string) (string, error) {
 	return id.String(), nil
 }
 
+func (c *Client) Remove(name string) error {
+	tree, err := c.FSSnapshot()
+	if err != nil {
+		return err
+	}
+
+	rawMeta, err := fs.ReadFile(tree, name)
+	if err != nil {
+		return err
+	}
+
+	var item Item
+	err = json.Unmarshal(rawMeta, &item)
+	if err != nil {
+		return err
+	}
+
+	deleteReq := []deleteDocumentRequest{
+		{
+			ID:      item.ID,
+			Version: item.Version,
+		},
+	}
+
+	reqTxt, err := json.Marshal(deleteReq)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("PUT", APIHost+DeleteAPI, bytes.NewBuffer(reqTxt))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "Bearer "+c.creds.Token())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	_, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("non-200 status code: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func (c *Client) FSSnapshot() (fs.FS, error) {
 	items, err := c.List()
 	if err != nil {
@@ -414,6 +466,11 @@ type Item struct {
 	Parent    string `json:"Parent,omitempty"`
 	Version   int    `json:"Version,omitempty"`
 	UploadURL string `json:"BlobURLPut,omitempty"`
+}
+
+type deleteDocumentRequest struct {
+	ID      string
+	Version int
 }
 
 type uploadDocumentRequest struct {

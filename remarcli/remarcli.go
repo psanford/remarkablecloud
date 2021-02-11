@@ -10,6 +10,7 @@ var rootCmd = &cobra.Command{
 func main() {
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(putCommand())
+	rootCmd.AddCommand(rmCommand())
 
 	rootCmd.Execute()
 
