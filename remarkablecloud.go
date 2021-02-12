@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -70,6 +71,7 @@ func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
 	if parent == "" {
 		parentItem.ID = ""
 	} else {
+		parent = strings.TrimSuffix(parent, "/")
 		parentStat, err := fs.Stat(tree, parent)
 		if err != nil {
 			return "", fmt.Errorf("parent dir error: %w", err)
@@ -177,7 +179,6 @@ func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
 		return "", err
 	}
 	body, _ = ioutil.ReadAll(resp.Body)
-	fmt.Printf("body upload: %s\n", body)
 	resp.Body.Close()
 
 	item := metadataDocument{
@@ -207,7 +208,6 @@ func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ = ioutil.ReadAll(resp.Body)
-	fmt.Printf("body:%s\n", body)
 
 	return id.String(), nil
 }
@@ -221,12 +221,14 @@ func (c *Client) Mkdir(p string) (string, error) {
 	}
 
 	parent, dirName := filepath.Split(p)
-	parentStat, err := fs.Stat(tree, parent)
-	if err != nil {
-		return "", fmt.Errorf("parent dir error: %w", err)
-	}
-	if !parentStat.IsDir() {
-		return "", fmt.Errorf("parent is not directory")
+	if parent != "" {
+		parentStat, err := fs.Stat(tree, parent)
+		if err != nil {
+			return "", fmt.Errorf("parent dir error: %w", err)
+		}
+		if !parentStat.IsDir() {
+			return "", fmt.Errorf("parent is not directory")
+		}
 	}
 
 	var parentItem Item
