@@ -6,21 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"io/ioutil"
 	"net/http"
 	"path"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/psanford/memfs"
 )
 
@@ -254,12 +249,6 @@ type putBlobOptions struct {
 
 type PutBlobOption func(opt *putBlobOptions)
 
-func WithGeneration(gen int) PutBlobOption {
-	return func(opt *putBlobOptions) {
-		opt.generation = strconv.Itoa(gen)
-	}
-}
-
 func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 	var options putBlobOptions
 	for _, opt := range opts {
@@ -309,6 +298,12 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 	return err
 }
 
+func WithGeneration(gen int) PutBlobOption {
+	return func(opt *putBlobOptions) {
+		opt.generation = strconv.Itoa(gen)
+	}
+}
+
 func hashKey(r io.ReadSeeker) (string, error) {
 	h := sha256.New()
 
@@ -325,415 +320,13 @@ func hashKey(r io.ReadSeeker) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func (c *Client) putBlobWithHashedContent(id string, r io.ReadSeeker) (*blobMetadata, error) {
-	key, err := hashKey(r)
-	if err != nil {
-		return nil, err
-	}
-
-	err = c.PutBlob(key, r)
-	if err != nil {
-		return nil, err
-	}
-
-	size, err := r.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
-	meta := blobMetadata{
-		hash:      key,
-		id:        id,
-		blobType:  "0",
-		fileCount: 0,
-		size:      int(size),
-	}
-
-	return &meta, nil
-}
-
-func (c *Client) putContentDoc(id, ext string) (*blobMetadata, error) {
-	cdoc := contentDoc{
-		DummyDocument: false,
-		ExtraMetadata: contentDocExtraMetadata{
-			LastPen:             "Finelinerv2",
-			LastTool:            "Finelinerv2",
-			LastFinelinerv2Size: "1",
-		},
-		FileType:   ext,
-		LineHeight: -1,
-		Margins:    180,
-		TextScale:  1,
-		Transform: contentDocTransform{
-			M11: 1,
-			M22: 1,
-			M33: 1,
-		},
-	}
-	cdocJson, err := json.Marshal(cdoc)
-	if err != nil {
-		return nil, err
-	}
-
-	cdocID := fmt.Sprintf("%s.content", id)
-	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(cdocJson))
-}
-
-func (c *Client) putEmptyContentDoc(id string) (*blobMetadata, error) {
-	cdocJson := []byte("{}")
-
-	cdocID := fmt.Sprintf("%s.content", id)
-	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(cdocJson))
-}
-
-func (c *Client) putMetaDoc(parentID, id, fileName string) (*blobMetadata, error) {
-	item := metadataDoc{
-		Parent:       parentID,
-		Synced:       true,
-		VisibleName:  fileName,
-		LastModified: strconv.Itoa(int(time.Now().UnixNano())),
-		Type:         documentType,
-	}
-
-	itemJson, err := json.Marshal(item)
-	if err != nil {
-		return nil, err
-	}
-
-	itemID := fmt.Sprintf("%s.metadata", id)
-	return c.putBlobWithHashedContent(itemID, bytes.NewReader(itemJson))
-}
-
-func (c *Client) putMetaDirDoc(parentID, id, fileName string) (*blobMetadata, error) {
-	item := metadataDoc{
-		Parent:       parentID,
-		Synced:       true,
-		VisibleName:  fileName,
-		LastModified: strconv.Itoa(int(time.Now().UnixNano())),
-		Type:         collectionType,
-	}
-
-	itemJson, err := json.Marshal(item)
-	if err != nil {
-		return nil, err
-	}
-
-	itemID := fmt.Sprintf("%s.metadata", id)
-	return c.putBlobWithHashedContent(itemID, bytes.NewReader(itemJson))
-}
-
-func (c *Client) putEmptyPageData(id string) (*blobMetadata, error) {
-	cdocID := fmt.Sprintf("%s.pagedata", id)
-	data := make([]byte, 0)
-	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(data))
-}
-
-func (c *Client) putListing(id string, blobs []blobMetadata) (*blobMetadata, error) {
-	sort.Slice(blobs, func(i, j int) bool {
-		return blobs[i].id < blobs[j].id
-	})
-
-	var buf bytes.Buffer
-
-	h := sha256.New()
-
-	fmt.Fprintf(&buf, "%s\n", schemaVersion)
-	for _, blob := range blobs {
-		fmt.Fprintf(&buf, "%s\n", blob.String())
-
-		hashBytes, err := hex.DecodeString(blob.hash)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hash for %s:%s", blob.hash, blob.id)
-		}
-		h.Write(hashBytes)
-	}
-
-	key := hex.EncodeToString(h.Sum(nil))
-
-	r := bytes.NewReader(buf.Bytes())
-
-	err := c.PutBlob(key, r)
-	if err != nil {
-		return nil, err
-	}
-
-	ret := blobMetadata{
-		hash:      key,
-		id:        id,
-		blobType:  "80000000",
-		fileCount: len(blobs),
-		size:      0,
-	}
-
-	return &ret, nil
-}
-
 type PutResult struct {
 	OldRootHash string
 	NewRootHash string
 	DocID       string
 }
 
-func (c *Client) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
-	raw, err := c.rawList()
-	if err != nil {
-		return nil, err
-	}
-
-	items := raw.items
-
-	tree, err := c.fsSnapshotFromList(items)
-	if err != nil {
-		return nil, err
-	}
-
-	parent, fileName := filepath.Split(p)
-
-	var parentItem Item
-	if parent == "" {
-		parentItem.ID = ""
-	} else {
-		parent = strings.TrimSuffix(parent, "/")
-		parentStat, err := fs.Stat(tree, parent)
-		if err != nil {
-			return nil, fmt.Errorf("parent dir error: %w", err)
-		}
-		if !parentStat.IsDir() {
-			return nil, fmt.Errorf("parent is not directory")
-		}
-		rawMeta, err := fs.ReadFile(tree, parent+"/.meta")
-		if err != nil {
-			return nil, fmt.Errorf("read parent dir metadata err: %w", err)
-		}
-		err = json.Unmarshal(rawMeta, &parentItem)
-		if err != nil {
-			return nil, fmt.Errorf("parse parent dir metadata err: %w", err)
-		}
-	}
-
-	uuid, err := uuid.NewRandom()
-	if err != nil {
-		return nil, err
-	}
-	id := uuid.String()
-
-	if ext != "epub" && ext != "pdf" {
-		return nil, errors.New("unsupported ext")
-	}
-
-	// put:
-	// .content  contentDoc
-	// .{pdf,epub}
-	// .metadata metadataDocument
-	// .pagedata (empty)
-
-	files := make([]blobMetadata, 0)
-	orig, err := c.putBlobWithHashedContent(id+"."+ext, r)
-	if err != nil {
-		return nil, fmt.Errorf("put raw doc err: %w", err)
-	}
-	files = append(files, *orig)
-
-	cmeta, err := c.putContentDoc(id, ext)
-	if err != nil {
-		return nil, fmt.Errorf("put contentDoc err: %w", err)
-	}
-	files = append(files, *cmeta)
-
-	meta, err := c.putMetaDoc(parentItem.ID, id, fileName)
-	if err != nil {
-		return nil, fmt.Errorf("put .metadata err: %w", err)
-	}
-	files = append(files, *meta)
-
-	pd, err := c.putEmptyPageData(id)
-	if err != nil {
-		return nil, fmt.Errorf("put .pagedata err: %w", err)
-	}
-	files = append(files, *pd)
-
-	listingMeta, err := c.putListing(id, files)
-	if err != nil {
-		return nil, fmt.Errorf("put listing err: %w", err)
-	}
-
-	rawEntries := raw.blobMetadata
-
-	rawEntries = append(rawEntries, *listingMeta)
-
-	rootMata, err := c.putListing("", rawEntries)
-	if err != nil {
-		return nil, fmt.Errorf("put root listing err: %w", err)
-	}
-
-	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
-
-	result := PutResult{
-		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
-		DocID:       id,
-	}
-
-	return &result, nil
-}
-
-// Mkdir creates a directory synced to the device.
-// On success, Mkdir returns the directory ID.
-func (c *Client) Mkdir(p string) (*PutResult, error) {
-	raw, err := c.rawList()
-	if err != nil {
-		return nil, err
-	}
-
-	items := raw.items
-
-	tree, err := c.fsSnapshotFromList(items)
-	if err != nil {
-		return nil, err
-	}
-
-	parent, dirName := filepath.Split(p)
-	if parent != "" {
-		parentStat, err := fs.Stat(tree, parent)
-		if err != nil {
-			return nil, fmt.Errorf("parent dir error: %w", err)
-		}
-		if !parentStat.IsDir() {
-			return nil, fmt.Errorf("parent is not directory")
-		}
-	}
-
-	var parentItem Item
-	if parent == "" {
-		parentItem.ID = ""
-	} else {
-		rawMeta, err := fs.ReadFile(tree, parent+"/.meta")
-		if err != nil {
-			return nil, fmt.Errorf("read parent dir metadata err: %w", err)
-		}
-		err = json.Unmarshal(rawMeta, &parentItem)
-		if err != nil {
-			return nil, fmt.Errorf("parse parent dir metadata err: %w", err)
-		}
-	}
-
-	uuid, err := uuid.NewRandom()
-	if err != nil {
-		panic(err)
-	}
-	id := uuid.String()
-
-	files := make([]blobMetadata, 0)
-
-	cmeta, err := c.putEmptyContentDoc(id)
-	if err != nil {
-		return nil, fmt.Errorf("put contentEmptyDoc err: %w", err)
-	}
-	files = append(files, *cmeta)
-
-	meta, err := c.putMetaDirDoc(parentItem.ID, id, dirName)
-	if err != nil {
-		return nil, fmt.Errorf("put .metadata err: %w", err)
-	}
-	files = append(files, *meta)
-
-	listingMeta, err := c.putListing(id, files)
-	if err != nil {
-		return nil, fmt.Errorf("put listing err: %w", err)
-	}
-
-	rawEntries := raw.blobMetadata
-
-	rawEntries = append(rawEntries, *listingMeta)
-
-	rootMata, err := c.putListing("", rawEntries)
-	if err != nil {
-		return nil, fmt.Errorf("put root listing err: %w", err)
-	}
-
-	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
-
-	result := PutResult{
-		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
-		DocID:       id,
-	}
-
-	return &result, nil
-}
-
-func (c *Client) Remove(name string) (*PutResult, error) {
-	raw, err := c.rawList()
-	if err != nil {
-		return nil, err
-	}
-
-	items := raw.items
-
-	tree, err := c.fsSnapshotFromList(items)
-	if err != nil {
-		return nil, err
-	}
-
-	rawMeta, err := fs.ReadFile(tree, name)
-	if err != nil {
-		return nil, err
-	}
-
-	var item Item
-	err = json.Unmarshal(rawMeta, &item)
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Printf("item: %+v\n", item)
-
-	index := raw.blobMetadata
-
-	matchingIdx := -1
-	for i, meta := range index {
-		if meta.hash == item.Hash {
-			matchingIdx = i
-			break
-		}
-	}
-
-	if matchingIdx < 0 {
-		return nil, fmt.Errorf("failed to find hash in root index: %s", item.Hash)
-	}
-
-	index = append(index[:matchingIdx], index[matchingIdx+1:]...)
-
-	rootMata, err := c.putListing("", index)
-	if err != nil {
-		return nil, fmt.Errorf("put root listing err: %w", err)
-	}
-
-	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
-
-	result := PutResult{
-		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
-		DocID:       item.ID,
-	}
-
-	return &result, nil
-}
-
 func (c *Client) fsSnapshotFromList(items []Item) (fs.FS, error) {
-
 	seen := make(map[string]Item)
 	paths := make(map[string]string)
 	rootFS := memfs.New()

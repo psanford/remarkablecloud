@@ -65,12 +65,22 @@ func putAction(cmd *cobra.Command, args []string) {
 
 	client := remarkablecloud.New(creds)
 
-	result, err := client.Put(name, ext, f)
+	batcher, err := client.NewBatch()
+	if err != nil {
+		log.Fatalf("new batch err: %s", err)
+	}
+
+	putResult, err := batcher.Put(name, ext, f)
 	if err != nil {
 		log.Fatalf("put file err: %s", err)
 	}
 
-	fmt.Printf("put success! %+v\n", result)
+	result, err := batcher.Commit()
+	if err != nil {
+		log.Fatalf("put file batch commit err: %s", err)
+	}
+
+	fmt.Printf("put success! id=%s %+v\n", putResult.DocID, result)
 }
 
 func setRootCommand() *cobra.Command {

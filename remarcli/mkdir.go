@@ -47,9 +47,19 @@ func mkDirAction(cmd *cobra.Command, args []string) {
 
 	client := remarkablecloud.New(creds)
 
-	result, err := client.Mkdir(path)
+	batcher, err := client.NewBatch()
+	if err != nil {
+		log.Fatalf("new batch err: %s", err)
+	}
+
+	_, err = batcher.Mkdir(path)
 	if err != nil {
 		log.Fatalf("mkdir err: %s", err)
+	}
+
+	result, err := batcher.Commit()
+	if err != nil {
+		log.Fatalf("batch commit err: %s", err)
 	}
 
 	fmt.Printf("mkdir success: %+v\n", result)

@@ -49,9 +49,19 @@ func rmAction(cmd *cobra.Command, args []string) {
 
 	client := remarkablecloud.New(creds)
 
-	result, err := client.Remove(fileName)
+	batcher, err := client.NewBatch()
+	if err != nil {
+		log.Fatalf("new batch err: %s", err)
+	}
+
+	_, err = batcher.Remove(fileName)
 	if err != nil {
 		log.Fatalf("rm file err: %s", err)
+	}
+
+	result, err := batcher.Commit()
+	if err != nil {
+		log.Fatalf("batch commit err: %s", err)
 	}
 
 	fmt.Printf("rm success: %+v\n", result)
