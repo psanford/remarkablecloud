@@ -4,35 +4,33 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"os"
 
 	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 )
 
-func rmCommand() *cobra.Command {
+func mkDirCommand() *cobra.Command {
 	cmd := cobra.Command{
-		Use:   "rm",
-		Short: "Rm file",
-		Run:   rmAction,
+		Use:   "mkdir <path>",
+		Short: "Make directory",
+		Run:   mkDirAction,
 	}
+
 	return &cmd
 }
 
-func rmAction(cmd *cobra.Command, args []string) {
-	if len(args) < 1 {
-		log.Printf("filename argument is required")
-		cmd.Usage()
-		os.Exit(1)
-	}
-
-	fileName := args[0]
-
+func mkDirAction(cmd *cobra.Command, args []string) {
 	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
 	if err != nil {
 		panic(err)
 	}
+
+	if len(args) < 1 {
+		log.Fatalf("usage: mkdir <path>")
+	}
+
+	path := args[0]
 
 	var tokens AuthTokens
 	err = yaml.Unmarshal(content, &tokens)
@@ -49,10 +47,10 @@ func rmAction(cmd *cobra.Command, args []string) {
 
 	client := remarkablecloud.New(creds)
 
-	result, err := client.Remove(fileName)
+	result, err := client.Mkdir(path)
 	if err != nil {
-		log.Fatalf("rm file err: %s", err)
+		log.Fatalf("mkdir err: %s", err)
 	}
 
-	fmt.Printf("rm success: %+v\n", result)
+	fmt.Printf("mkdir success: %+v\n", result)
 }

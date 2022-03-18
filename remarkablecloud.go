@@ -1,7 +1,6 @@
 package remarkablecloud
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
 	"crypto/sha256"
@@ -365,13 +364,38 @@ func (c *Client) putContentDoc(id, ext string) (*blobMetadata, error) {
 	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(cdocJson))
 }
 
+func (c *Client) putEmptyContentDoc(id string) (*blobMetadata, error) {
+	cdocJson := []byte("{}")
+
+	cdocID := fmt.Sprintf("%s.content", id)
+	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(cdocJson))
+}
+
 func (c *Client) putMetaDoc(parentID, id, fileName string) (*blobMetadata, error) {
 	item := metadataDoc{
 		Parent:       parentID,
 		Synced:       true,
 		VisibleName:  fileName,
 		LastModified: strconv.Itoa(int(time.Now().UnixNano())),
-		Type:         "DocumentType",
+		Type:         documentType,
+	}
+
+	itemJson, err := json.Marshal(item)
+	if err != nil {
+		return nil, err
+	}
+
+	itemID := fmt.Sprintf("%s.metadata", id)
+	return c.putBlobWithHashedContent(itemID, bytes.NewReader(itemJson))
+}
+
+func (c *Client) putMetaDirDoc(parentID, id, fileName string) (*blobMetadata, error) {
+	item := metadataDoc{
+		Parent:       parentID,
+		Synced:       true,
+		VisibleName:  fileName,
+		LastModified: strconv.Itoa(int(time.Now().UnixNano())),
+		Type:         collectionType,
 	}
 
 	itemJson, err := json.Marshal(item)
@@ -544,20 +568,27 @@ func (c *Client) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) 
 
 // Mkdir creates a directory synced to the device.
 // On success, Mkdir returns the directory ID.
-func (c *Client) Mkdir(p string) (string, error) {
-	tree, err := c.FSSnapshot()
+func (c *Client) Mkdir(p string) (*PutResult, error) {
+	raw, err := c.rawList()
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+
+	items := raw.items
+
+	tree, err := c.fsSnapshotFromList(items)
+	if err != nil {
+		return nil, err
 	}
 
 	parent, dirName := filepath.Split(p)
 	if parent != "" {
 		parentStat, err := fs.Stat(tree, parent)
 		if err != nil {
-			return "", fmt.Errorf("parent dir error: %w", err)
+			return nil, fmt.Errorf("parent dir error: %w", err)
 		}
 		if !parentStat.IsDir() {
-			return "", fmt.Errorf("parent is not directory")
+			return nil, fmt.Errorf("parent is not directory")
 		}
 	}
 
@@ -567,155 +598,123 @@ func (c *Client) Mkdir(p string) (string, error) {
 	} else {
 		rawMeta, err := fs.ReadFile(tree, parent+"/.meta")
 		if err != nil {
-			return "", fmt.Errorf("read parent dir metadata err: %w", err)
+			return nil, fmt.Errorf("read parent dir metadata err: %w", err)
 		}
 		err = json.Unmarshal(rawMeta, &parentItem)
 		if err != nil {
-			return "", fmt.Errorf("parse parent dir metadata err: %w", err)
+			return nil, fmt.Errorf("parse parent dir metadata err: %w", err)
 		}
 	}
 
-	id, err := uuid.NewRandom()
+	uuid, err := uuid.NewRandom()
 	if err != nil {
 		panic(err)
 	}
+	id := uuid.String()
 
-	doc := uploadDocumentRequest{
-		ID:      id.String(),
-		Type:    "CollectionType",
-		Version: 1,
-	}
+	files := make([]blobMetadata, 0)
 
-	docJSON, err := json.Marshal([]uploadDocumentRequest{doc})
+	cmeta, err := c.putEmptyContentDoc(id)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("put contentEmptyDoc err: %w", err)
 	}
+	files = append(files, *cmeta)
 
-	req, err := http.NewRequest("PUT", APIHost+UploadReqAPI, bytes.NewBuffer(docJSON))
+	meta, err := c.putMetaDirDoc(parentItem.ID, id, dirName)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("put .metadata err: %w", err)
 	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-	resp, err := http.DefaultClient.Do(req)
+	files = append(files, *meta)
+
+	listingMeta, err := c.putListing(id, files)
 	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	var uploadResp []uploadDocumentResponse
-	err = json.Unmarshal(body, &uploadResp)
-	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("put listing err: %w", err)
 	}
 
-	var b bytes.Buffer
-	zipW := zip.NewWriter(&b)
-	f, err := zipW.Create(fmt.Sprintf("%s.content", id.String()))
+	rawEntries := raw.blobMetadata
+
+	rawEntries = append(rawEntries, *listingMeta)
+
+	rootMata, err := c.putListing("", rawEntries)
 	if err != nil {
-		return "", err
-	}
-	f.Write([]byte("{}"))
-	err = zipW.Close()
-	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("put root listing err: %w", err)
 	}
 
-	req, err = http.NewRequest("PUT", uploadResp[0].BlobURLPut, &b)
+	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
+
 	if err != nil {
-		return "", err
-	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	body, _ = ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	item := oldBrokenMetadataDocument{
-		Parent:         parentItem.ID,
-		VissibleName:   dirName,
-		Version:        1,
-		ID:             uploadResp[0].ID,
-		ModifiedClient: time.Now().Format(time.RFC3339Nano),
-
-		Type: "CollectionType",
+		return nil, fmt.Errorf("put root ptr err: %w", err)
 	}
 
-	itemJSON, err := json.Marshal([]oldBrokenMetadataDocument{item})
-	if err != nil {
-		return "", err
+	result := PutResult{
+		OldRootHash: raw.rootHash,
+		NewRootHash: rootMata.hash,
+		DocID:       id,
 	}
 
-	req, err = http.NewRequest("PUT", APIHost+UpdateAPI, bytes.NewBuffer(itemJSON))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ = ioutil.ReadAll(resp.Body)
-
-	return id.String(), nil
+	return &result, nil
 }
 
-func (c *Client) Remove(name string) error {
-	tree, err := c.FSSnapshot()
+func (c *Client) Remove(name string) (*PutResult, error) {
+	raw, err := c.rawList()
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	items := raw.items
+
+	tree, err := c.fsSnapshotFromList(items)
+	if err != nil {
+		return nil, err
 	}
 
 	rawMeta, err := fs.ReadFile(tree, name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var item Item
 	err = json.Unmarshal(rawMeta, &item)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	deleteReq := []deleteDocumentRequest{
-		{
-			ID:      item.ID,
-			Version: item.Version,
-		},
+	fmt.Printf("item: %+v\n", item)
+
+	index := raw.blobMetadata
+
+	matchingIdx := -1
+	for i, meta := range index {
+		if meta.hash == item.Hash {
+			matchingIdx = i
+			break
+		}
 	}
 
-	reqTxt, err := json.Marshal(deleteReq)
+	if matchingIdx < 0 {
+		return nil, fmt.Errorf("failed to find hash in root index: %s", item.Hash)
+	}
+
+	index = append(index[:matchingIdx], index[matchingIdx+1:]...)
+
+	rootMata, err := c.putListing("", index)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("put root listing err: %w", err)
 	}
 
-	req, err := http.NewRequest("PUT", APIHost+DeleteAPI, bytes.NewBuffer(reqTxt))
+	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
+
 	if err != nil {
-		return err
-	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	_, err = ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
+		return nil, fmt.Errorf("put root ptr err: %w", err)
 	}
 
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("non-200 status code: %d", resp.StatusCode)
+	result := PutResult{
+		OldRootHash: raw.rootHash,
+		NewRootHash: rootMata.hash,
+		DocID:       item.ID,
 	}
 
-	return nil
+	return &result, nil
 }
 
 func (c *Client) fsSnapshotFromList(items []Item) (fs.FS, error) {
@@ -785,8 +784,8 @@ const (
 )
 
 type Item struct {
-	ID               string `json:"-"`
-	Hash             string `json:"-"`
+	ID               string `json:"__pms_id"`
+	Hash             string `json:"__pms_hash"`
 	Deleted          bool   `json:"deleted"`
 	LastModified     string `json:"lastModified"`
 	LastOpened       string `json:"lastOpened"`
@@ -799,26 +798,6 @@ type Item struct {
 	Type             string `json:"type"`
 	Version          int    `json:"version"`
 	Name             string `json:"visibleName"`
-}
-
-type deleteDocumentRequest struct {
-	ID      string
-	Version int
-}
-
-type uploadDocumentRequest struct {
-	ID      string
-	Type    string
-	Version int
-}
-
-type uploadDocumentResponse struct {
-	ID                string
-	Version           int
-	Message           string
-	Success           bool
-	BlobURLPut        string
-	BlobURLPutExpires string
 }
 
 type metadataDoc struct {
@@ -903,13 +882,4 @@ type blobMetadata struct {
 
 func (m *blobMetadata) String() string {
 	return fmt.Sprintf("%s:%s:%s:%d:%d", m.hash, m.blobType, m.id, m.fileCount, m.size)
-}
-
-type oldBrokenMetadataDocument struct {
-	ID             string
-	Parent         string
-	VissibleName   string
-	Type           string
-	Version        int
-	ModifiedClient string
 }
