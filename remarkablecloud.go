@@ -195,6 +195,20 @@ OUTER:
 	}, nil
 }
 
+func (c *Client) NewBatch() (*Batch, error) {
+	b := &Batch{
+		blobs: make(map[string]batchBlob),
+		c:     c,
+	}
+
+	_, err := b.loadTree()
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
 func (c *Client) List() ([]Item, error) {
 	raw, err := c.rawList()
 	return raw.items, err
@@ -234,7 +248,8 @@ func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
 }
 
 type putBlobOptions struct {
-	generation string
+	generation    string
+	isRootListing bool
 }
 
 type PutBlobOption func(opt *putBlobOptions)

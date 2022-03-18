@@ -40,7 +40,12 @@ func listAction(cmd *cobra.Command, args []string) {
 
 	client := remarkablecloud.New(creds)
 
-	items, err := client.List()
+	batch, err := client.NewBatch()
+	if err != nil {
+		log.Fatalf("new batch err: %s", err)
+	}
+
+	items, err := batch.List()
 	if err != nil {
 		log.Fatalf("List items err: %s", err)
 	}
