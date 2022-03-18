@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"io/ioutil"
 	"log"
 
@@ -52,21 +51,21 @@ func listAction(cmd *cobra.Command, args []string) {
 
 	fmt.Println()
 
-	tree, err := client.FSSnapshot()
-	if err != nil {
-		log.Fatalf("FSSnapshot err: %s", err)
-	}
+	// tree, err := client.FSSnapshot()
+	// if err != nil {
+	// 	log.Fatalf("FSSnapshot err: %s", err)
+	// }
 
-	err = fs.WalkDir(tree, ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%s\n", path)
-		return nil
-	})
-	if err != nil {
-		log.Fatalf("WalkDir err: %s", err)
-	}
+	// err = fs.WalkDir(tree, ".", func(path string, d fs.DirEntry, err error) error {
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	fmt.Printf("%s\n", path)
+	// 	return nil
+	// })
+	// if err != nil {
+	// 	log.Fatalf("WalkDir err: %s", err)
+	// }
 }
 
 type refreshable interface {

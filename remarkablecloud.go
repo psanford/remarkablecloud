@@ -2,6 +2,7 @@ package remarkablecloud
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,9 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +28,8 @@ var (
 	UpdateAPI    = "/document-storage/json/2/upload/update-status"
 	DeleteAPI    = "/document-storage/json/2/delete"
 	UploadReqAPI = "/document-storage/json/2/upload/request"
+
+	DownloadURL = "https://rm-blob-storage-prod.appspot.com/api/v1/signed-urls/downloads"
 )
 
 func New(creds CredentialProvider) *Client {
@@ -33,8 +38,13 @@ func New(creds CredentialProvider) *Client {
 	}
 }
 
-func (c *Client) List() ([]Item, error) {
-	req, err := http.NewRequest("GET", APIHost+ListAPI, nil)
+func (c *Client) GetBlob(id string) (*http.Response, error) {
+	var metaReq = storageRequest{
+		Method:       "GET",
+		RelativePath: id,
+	}
+	reqJson, _ := json.Marshal(metaReq)
+	req, err := http.NewRequest("POST", DownloadURL, bytes.NewReader(reqJson))
 	if err != nil {
 		return nil, err
 	}
@@ -51,12 +61,151 @@ func (c *Client) List() ([]Item, error) {
 		return nil, err
 	}
 
-	var data []Item
+	var data storageResp
 	if err := json.Unmarshal(body, &data); err != nil {
 		return nil, fmt.Errorf("Invalid response json: %q, %s", err, body)
 	}
 
-	return data, nil
+	return http.Get(data.URL)
+}
+
+func (c *Client) List() ([]Item, error) {
+	resp, err := c.GetBlob("root")
+	if err != nil {
+		return nil, err
+	}
+
+	rootBlobID, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err = c.GetBlob(string(rootBlobID))
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := readBlobIndex(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		wg           sync.WaitGroup
+		fetcherCount = 50
+		fetchChan    = make(chan blobMetadata)
+		itemChan     = make(chan Item)
+		errChan      = make(chan error)
+		doneChan     = make(chan struct{})
+	)
+
+	for i := 0; i < fetcherCount; i++ {
+		wg.Add(1)
+		go func() {
+			for meta := range fetchChan {
+				resp, err := c.GetBlob(meta.hash)
+				if err != nil {
+					errChan <- err
+					continue
+				}
+
+				fileEntries, err := readBlobIndex(resp.Body)
+				if err != nil {
+					errChan <- err
+					continue
+				}
+
+				for _, entry := range fileEntries {
+					if strings.HasSuffix(entry.id, ".metadata") && !strings.ContainsRune(entry.id, '/') {
+						resp, err = c.GetBlob(entry.hash)
+						if err != nil {
+							errChan <- fmt.Errorf("fetch item %s err: %w", entry.id, err)
+							break
+						}
+
+						var item Item
+						err = json.NewDecoder(resp.Body).Decode(&item)
+						if err != nil {
+							errChan <- fmt.Errorf("decode item %s metadata err: %w", entry.id, err)
+							break
+						}
+
+						item.ID = meta.id
+						item.Hash = meta.hash
+
+						itemChan <- item
+					}
+				}
+
+			}
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		for _, entry := range entries {
+			fetchChan <- entry
+		}
+		close(fetchChan)
+
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	var items []Item
+	var errors []string
+OUTER:
+	for {
+		select {
+		case item := <-itemChan:
+			items = append(items, item)
+		case err := <-errChan:
+			errors = append(errors, err.Error())
+
+		case <-doneChan:
+			break OUTER
+		}
+	}
+
+	if len(errors) > 0 {
+		errStr := strings.Join(errors, ";")
+		return nil, fmt.Errorf("fetch errors: %s", errStr)
+	}
+
+	return items, nil
+}
+
+func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
+	scanner := bufio.NewScanner(r)
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("index metadata not found")
+	}
+
+	version := scanner.Text()
+	if version != "3" {
+		return nil, fmt.Errorf("unsupported index metadata version: %s, expected 3", version)
+	}
+
+	var entries []blobMetadata
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.FieldsFunc(line, func(r rune) bool { return r == ':' })
+
+		count, _ := strconv.Atoi(fields[3])
+		size, _ := strconv.Atoi(fields[4])
+
+		entry := blobMetadata{
+			hash:      fields[0],
+			blobType:  fields[1],
+			id:        fields[2],
+			fileCount: count,
+			size:      size,
+		}
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }
 
 func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
@@ -462,12 +611,20 @@ type metadataDocument struct {
 }
 
 type Item struct {
-	ID        string `json:"ID,omitempty"`
-	Type      string `json:"Type,omitempty"`
-	Name      string `json:"VissibleName,omitempty"`
-	Parent    string `json:"Parent,omitempty"`
-	Version   int    `json:"Version,omitempty"`
-	UploadURL string `json:"BlobURLPut,omitempty"`
+	ID               string
+	Hash             string
+	Deleted          bool   `json:"deleted"`
+	LastModified     string `json:"lastModified"`
+	LastOpened       string `json:"lastOpened"`
+	LastOpenedPage   int    `json:"lastOpenedPage"`
+	Metadatamodified bool   `json:"metadatamodified"`
+	Modified         bool   `json:"modified"`
+	Parent           string `json:"parent"`
+	Pinned           bool   `json:"pinned"`
+	Synced           bool   `json:"synced"`
+	Type             string `json:"type"`
+	Version          int    `json:"version"`
+	Name             string `json:"visibleName"`
 }
 
 type deleteDocumentRequest struct {
@@ -532,4 +689,24 @@ type contentDocTransform struct {
 	M31 float32 `json:"m31"`
 	M32 float32 `json:"m32"`
 	M33 float32 `json:"m33"`
+}
+
+type storageResp struct {
+	Expires      string `json:"expires"`
+	Method       string `json:"method"`
+	RelativePath string `json:"relative_path"`
+	URL          string `json:"url"`
+}
+
+type storageRequest struct {
+	RelativePath string `json:"relative_path"`
+	Method       string `json:"http_method"`
+}
+
+type blobMetadata struct {
+	hash      string
+	id        string
+	blobType  string
+	fileCount int
+	size      int
 }
