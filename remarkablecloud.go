@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +33,9 @@ var (
 	UploadReqAPI = "/document-storage/json/2/upload/request"
 
 	DownloadURL = "https://rm-blob-storage-prod.appspot.com/api/v1/signed-urls/downloads"
+	UploadURL   = "https://rm-blob-storage-prod.appspot.com/api/v1/signed-urls/uploads"
+
+	schemaVersion = "3"
 )
 
 func New(creds CredentialProvider) *Client {
@@ -69,11 +75,21 @@ func (c *Client) GetBlob(id string) (*http.Response, error) {
 	return http.Get(data.URL)
 }
 
-func (c *Client) List() ([]Item, error) {
+type rawListResult struct {
+	items        []Item
+	blobMetadata []blobMetadata
+	generation   int
+	rootHash     string
+}
+
+func (c *Client) rawList() (*rawListResult, error) {
 	resp, err := c.GetBlob("root")
 	if err != nil {
 		return nil, err
 	}
+
+	genStr := resp.Header.Get("x-goog-generation")
+	generation, _ := strconv.Atoi(genStr)
 
 	rootBlobID, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -172,7 +188,17 @@ OUTER:
 		return nil, fmt.Errorf("fetch errors: %s", errStr)
 	}
 
-	return items, nil
+	return &rawListResult{
+		items:        items,
+		blobMetadata: entries,
+		generation:   generation,
+		rootHash:     string(rootBlobID),
+	}, nil
+}
+
+func (c *Client) List() ([]Item, error) {
+	raw, err := c.rawList()
+	return raw.items, err
 }
 
 func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
@@ -182,8 +208,8 @@ func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
 	}
 
 	version := scanner.Text()
-	if version != "3" {
-		return nil, fmt.Errorf("unsupported index metadata version: %s, expected 3", version)
+	if version != schemaVersion {
+		return nil, fmt.Errorf("unsupported index metadata version: %s, expected %s", version, schemaVersion)
 	}
 
 	var entries []blobMetadata
@@ -208,93 +234,111 @@ func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
 	return entries, nil
 }
 
-func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
-	tree, err := c.FSSnapshot()
+type putBlobOptions struct {
+	generation string
+}
+
+type PutBlobOption func(opt *putBlobOptions)
+
+func WithGeneration(gen int) PutBlobOption {
+	return func(opt *putBlobOptions) {
+		opt.generation = strconv.Itoa(gen)
+	}
+}
+
+func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
+	var options putBlobOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	putReq := storageRequest{
+		Method:       "PUT",
+		RelativePath: key,
+		Generation:   options.generation,
+	}
+
+	putReqJson, err := json.Marshal(putReq)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	parent, fileName := filepath.Split(p)
-
-	var parentItem Item
-	if parent == "" {
-		parentItem.ID = ""
-	} else {
-		parent = strings.TrimSuffix(parent, "/")
-		parentStat, err := fs.Stat(tree, parent)
-		if err != nil {
-			return "", fmt.Errorf("parent dir error: %w", err)
-		}
-		if !parentStat.IsDir() {
-			return "", fmt.Errorf("parent is not directory")
-		}
-		rawMeta, err := fs.ReadFile(tree, parent+"/.meta")
-		if err != nil {
-			return "", fmt.Errorf("read parent dir metadata err: %w", err)
-		}
-		err = json.Unmarshal(rawMeta, &parentItem)
-		if err != nil {
-			return "", fmt.Errorf("parse parent dir metadata err: %w", err)
-		}
-	}
-
-	id, err := uuid.NewRandom()
+	req, err := http.NewRequest("POST", UploadURL, bytes.NewBuffer(putReqJson))
 	if err != nil {
-		return "", err
-	}
-
-	if ext != "epub" && ext != "pdf" {
-		return "", errors.New("unsupported ext")
-	}
-
-	doc := uploadDocumentRequest{
-		ID:      id.String(),
-		Type:    "DocumentType",
-		Version: 1,
-	}
-
-	docJSON, err := json.Marshal([]uploadDocumentRequest{doc})
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("PUT", APIHost+UploadReqAPI, bytes.NewBuffer(docJSON))
-	if err != nil {
-		return "", err
+		return err
 	}
 	req.Header.Set("authorization", "Bearer "+c.creds.Token())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
-	}
-	var uploadResp []uploadDocumentResponse
-	err = json.Unmarshal(body, &uploadResp)
-	if err != nil {
-		return "", err
+		return err
 	}
 
-	var b bytes.Buffer
-	zipW := zip.NewWriter(&b)
-
-	fData, err := zipW.Create(fmt.Sprintf("%s.%s", id.String(), ext))
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(fData, r)
-	if err != nil {
-		return "", fmt.Errorf("create zip err: %w", err)
+	var data storageResp
+	if err := json.Unmarshal(body, &data); err != nil {
+		return fmt.Errorf("Invalid response json: %q, %s", err, body)
 	}
 
-	fMeta, err := zipW.Create(fmt.Sprintf("%s.content", id.String()))
+	req, err = http.NewRequest("PUT", data.URL, r)
 	if err != nil {
-		return "", err
+		return fmt.Errorf("PUT req err: %w", err)
 	}
 
+	if options.generation != "" {
+		req.Header.Add("x-goog-if-generation-match", options.generation)
+	}
+
+	_, err = http.DefaultClient.Do(req)
+	return err
+}
+
+func hashKey(r io.ReadSeeker) (string, error) {
+	h := sha256.New()
+
+	_, err := io.Copy(h, r)
+	if err != nil {
+		return "", fmt.Errorf("read file err: %w", err)
+	}
+
+	_, err = r.Seek(0, io.SeekStart)
+	if err != nil {
+		return "", fmt.Errorf("seek err: %w", err)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (c *Client) putBlobWithHashedContent(id string, r io.ReadSeeker) (*blobMetadata, error) {
+	key, err := hashKey(r)
+	if err != nil {
+		return nil, err
+	}
+
+	err = c.PutBlob(key, r)
+	if err != nil {
+		return nil, err
+	}
+
+	size, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	meta := blobMetadata{
+		hash:      key,
+		id:        id,
+		blobType:  "0",
+		fileCount: 0,
+		size:      int(size),
+	}
+
+	return &meta, nil
+}
+
+func (c *Client) putContentDoc(id, ext string) (*blobMetadata, error) {
 	cdoc := contentDoc{
 		DummyDocument: false,
 		ExtraMetadata: contentDocExtraMetadata{
@@ -312,53 +356,190 @@ func (c *Client) Put(p string, ext string, r io.Reader) (string, error) {
 			M33: 1,
 		},
 	}
-	json.NewEncoder(fMeta).Encode(cdoc)
-	err = zipW.Close()
+	cdocJson, err := json.Marshal(cdoc)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	req, err = http.NewRequest("PUT", uploadResp[0].BlobURLPut, &b)
+	cdocID := fmt.Sprintf("%s.content", id)
+	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(cdocJson))
+}
+
+func (c *Client) putMetaDoc(parentID, id, fileName string) (*blobMetadata, error) {
+	item := metadataDoc{
+		Parent:       parentID,
+		Synced:       true,
+		VisibleName:  fileName,
+		LastModified: strconv.Itoa(int(time.Now().UnixNano())),
+		Type:         "DocumentType",
+	}
+
+	itemJson, err := json.Marshal(item)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-	resp, err = http.DefaultClient.Do(req)
+
+	itemID := fmt.Sprintf("%s.metadata", id)
+	return c.putBlobWithHashedContent(itemID, bytes.NewReader(itemJson))
+}
+
+func (c *Client) putEmptyPageData(id string) (*blobMetadata, error) {
+	cdocID := fmt.Sprintf("%s.pagedata", id)
+	data := make([]byte, 0)
+	return c.putBlobWithHashedContent(cdocID, bytes.NewReader(data))
+}
+
+func (c *Client) putListing(id string, blobs []blobMetadata) (*blobMetadata, error) {
+	sort.Slice(blobs, func(i, j int) bool {
+		return blobs[i].id < blobs[j].id
+	})
+
+	var buf bytes.Buffer
+
+	h := sha256.New()
+
+	fmt.Fprintf(&buf, "%s\n", schemaVersion)
+	for _, blob := range blobs {
+		fmt.Fprintf(&buf, "%s\n", blob.String())
+
+		hashBytes, err := hex.DecodeString(blob.hash)
+		if err != nil {
+			return nil, fmt.Errorf("invalid hash for %s:%s", blob.hash, blob.id)
+		}
+		h.Write(hashBytes)
+	}
+
+	key := hex.EncodeToString(h.Sum(nil))
+
+	r := bytes.NewReader(buf.Bytes())
+
+	err := c.PutBlob(key, r)
 	if err != nil {
-		return "", err
-	}
-	body, _ = ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	item := metadataDocument{
-		Parent:         parentItem.ID,
-		VissibleName:   fileName,
-		Version:        1,
-		ID:             uploadResp[0].ID,
-		ModifiedClient: time.Now().Format(time.RFC3339Nano),
-
-		Type: "DocumentType",
+		return nil, err
 	}
 
-	itemJSON, err := json.Marshal([]metadataDocument{item})
+	ret := blobMetadata{
+		hash:      key,
+		id:        id,
+		blobType:  "80000000",
+		fileCount: len(blobs),
+		size:      0,
+	}
+
+	return &ret, nil
+}
+
+type PutResult struct {
+	OldRootHash string
+	NewRootHash string
+	DocID       string
+}
+
+func (c *Client) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
+	raw, err := c.rawList()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	req, err = http.NewRequest("PUT", APIHost+UpdateAPI, bytes.NewBuffer(itemJSON))
+	items := raw.items
+
+	tree, err := c.fsSnapshotFromList(items)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
 
-	resp, err = http.DefaultClient.Do(req)
+	parent, fileName := filepath.Split(p)
+
+	var parentItem Item
+	if parent == "" {
+		parentItem.ID = ""
+	} else {
+		parent = strings.TrimSuffix(parent, "/")
+		parentStat, err := fs.Stat(tree, parent)
+		if err != nil {
+			return nil, fmt.Errorf("parent dir error: %w", err)
+		}
+		if !parentStat.IsDir() {
+			return nil, fmt.Errorf("parent is not directory")
+		}
+		rawMeta, err := fs.ReadFile(tree, parent+"/.meta")
+		if err != nil {
+			return nil, fmt.Errorf("read parent dir metadata err: %w", err)
+		}
+		err = json.Unmarshal(rawMeta, &parentItem)
+		if err != nil {
+			return nil, fmt.Errorf("parse parent dir metadata err: %w", err)
+		}
+	}
+
+	uuid, err := uuid.NewRandom()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ = ioutil.ReadAll(resp.Body)
+	id := uuid.String()
 
-	return id.String(), nil
+	if ext != "epub" && ext != "pdf" {
+		return nil, errors.New("unsupported ext")
+	}
+
+	// put:
+	// .content  contentDoc
+	// .{pdf,epub}
+	// .metadata metadataDocument
+	// .pagedata (empty)
+
+	files := make([]blobMetadata, 0)
+	orig, err := c.putBlobWithHashedContent(id+"."+ext, r)
+	if err != nil {
+		return nil, fmt.Errorf("put raw doc err: %w", err)
+	}
+	files = append(files, *orig)
+
+	cmeta, err := c.putContentDoc(id, ext)
+	if err != nil {
+		return nil, fmt.Errorf("put contentDoc err: %w", err)
+	}
+	files = append(files, *cmeta)
+
+	meta, err := c.putMetaDoc(parentItem.ID, id, fileName)
+	if err != nil {
+		return nil, fmt.Errorf("put .metadata err: %w", err)
+	}
+	files = append(files, *meta)
+
+	pd, err := c.putEmptyPageData(id)
+	if err != nil {
+		return nil, fmt.Errorf("put .pagedata err: %w", err)
+	}
+	files = append(files, *pd)
+
+	listingMeta, err := c.putListing(id, files)
+	if err != nil {
+		return nil, fmt.Errorf("put listing err: %w", err)
+	}
+
+	rawEntries := raw.blobMetadata
+
+	rawEntries = append(rawEntries, *listingMeta)
+
+	rootMata, err := c.putListing("", rawEntries)
+	if err != nil {
+		return nil, fmt.Errorf("put root listing err: %w", err)
+	}
+
+	err = c.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
+
+	if err != nil {
+		return nil, fmt.Errorf("put root ptr err: %w", err)
+	}
+
+	result := PutResult{
+		OldRootHash: raw.rootHash,
+		NewRootHash: rootMata.hash,
+		DocID:       id,
+	}
+
+	return &result, nil
 }
 
 // Mkdir creates a directory synced to the device.
@@ -452,10 +633,9 @@ func (c *Client) Mkdir(p string) (string, error) {
 		return "", err
 	}
 	body, _ = ioutil.ReadAll(resp.Body)
-	fmt.Printf("body upload: %s\n", body)
 	resp.Body.Close()
 
-	item := metadataDocument{
+	item := oldBrokenMetadataDocument{
 		Parent:         parentItem.ID,
 		VissibleName:   dirName,
 		Version:        1,
@@ -465,7 +645,7 @@ func (c *Client) Mkdir(p string) (string, error) {
 		Type: "CollectionType",
 	}
 
-	itemJSON, err := json.Marshal([]metadataDocument{item})
+	itemJSON, err := json.Marshal([]oldBrokenMetadataDocument{item})
 	if err != nil {
 		return "", err
 	}
@@ -482,7 +662,6 @@ func (c *Client) Mkdir(p string) (string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ = ioutil.ReadAll(resp.Body)
-	fmt.Printf("body:%s\n", body)
 
 	return id.String(), nil
 }
@@ -539,11 +718,7 @@ func (c *Client) Remove(name string) error {
 	return nil
 }
 
-func (c *Client) FSSnapshot() (fs.FS, error) {
-	items, err := c.List()
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) fsSnapshotFromList(items []Item) (fs.FS, error) {
 
 	seen := make(map[string]Item)
 	paths := make(map[string]string)
@@ -576,7 +751,7 @@ func (c *Client) FSSnapshot() (fs.FS, error) {
 					}
 				} else {
 					data, _ := json.Marshal(item)
-					err = rootFS.WriteFile(pp, data, 0777)
+					err := rootFS.WriteFile(pp, data, 0777)
 					if err != nil {
 						panic(err)
 					}
@@ -596,23 +771,22 @@ func (c *Client) FSSnapshot() (fs.FS, error) {
 	return rootFS, nil
 }
 
+func (c *Client) FSSnapshot() (fs.FS, error) {
+	items, err := c.List()
+	if err != nil {
+		return nil, err
+	}
+	return c.fsSnapshotFromList(items)
+}
+
 const (
 	collectionType = "CollectionType"
 	documentType   = "DocumentType"
 )
 
-type metadataDocument struct {
-	ID             string
-	Parent         string
-	VissibleName   string
-	Type           string
-	Version        int
-	ModifiedClient string
-}
-
 type Item struct {
-	ID               string
-	Hash             string
+	ID               string `json:"-"`
+	Hash             string `json:"-"`
 	Deleted          bool   `json:"deleted"`
 	LastModified     string `json:"lastModified"`
 	LastOpened       string `json:"lastOpened"`
@@ -645,6 +819,21 @@ type uploadDocumentResponse struct {
 	Success           bool
 	BlobURLPut        string
 	BlobURLPutExpires string
+}
+
+type metadataDoc struct {
+	Deleted          bool   `json:"deleted"`
+	LastModified     string `json:"lastModified"`
+	LastOpened       string `json:"lastOpened"`
+	LastOpenedPage   int64  `json:"lastOpenedPage"`
+	MetadataModified bool   `json:"metadatamodified"`
+	Modified         bool   `json:"modified"`
+	Parent           string `json:"parent"`
+	Pinned           bool   `json:"pinned"`
+	Synced           bool   `json:"synced"`
+	Type             string `json:"type"`
+	Version          int64  `json:"version"`
+	VisibleName      string `json:"visibleName"`
 }
 
 type contentDoc struct {
@@ -701,6 +890,7 @@ type storageResp struct {
 type storageRequest struct {
 	RelativePath string `json:"relative_path"`
 	Method       string `json:"http_method"`
+	Generation   string `json:"generation,omitempty"`
 }
 
 type blobMetadata struct {
@@ -709,4 +899,17 @@ type blobMetadata struct {
 	blobType  string
 	fileCount int
 	size      int
+}
+
+func (m *blobMetadata) String() string {
+	return fmt.Sprintf("%s:%s:%s:%d:%d", m.hash, m.blobType, m.id, m.fileCount, m.size)
+}
+
+type oldBrokenMetadataDocument struct {
+	ID             string
+	Parent         string
+	VissibleName   string
+	Type           string
+	Version        int
+	ModifiedClient string
 }

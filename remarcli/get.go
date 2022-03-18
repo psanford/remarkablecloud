@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -19,6 +18,7 @@ func getBlobCommand() *cobra.Command {
 		Short: "Get blob by id",
 		Run:   getBlobAction,
 	}
+
 	return &cmd
 }
 
@@ -60,6 +60,4 @@ func getBlobAction(cmd *cobra.Command, args []string) {
 	defer resp.Body.Close()
 
 	io.Copy(os.Stdout, resp.Body)
-
-	fmt.Println()
 }

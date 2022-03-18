@@ -11,6 +11,8 @@ func main() {
 	rootCmd.AddCommand(listCommand())
 	rootCmd.AddCommand(treeCommand())
 	rootCmd.AddCommand(putCommand())
+	rootCmd.AddCommand(putBlobCommand())
+	rootCmd.AddCommand(setRootCommand())
 	rootCmd.AddCommand(rmCommand())
 	rootCmd.AddCommand(getBlobCommand())
 
