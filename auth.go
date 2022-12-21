@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	AuthHost           = "https://webapp-production-dot-remarkable-production.appspot.com"
+	AuthHost           = "https://webapp-prod.cloud.remarkable.engineering"
 	NewDeviceTokenPath = "/token/json/2/device/new"
 	NewUserTokenPath   = "/token/json/2/user/new"
 )
