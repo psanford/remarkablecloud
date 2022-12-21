@@ -6,15 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 )
 
 func putCommand() *cobra.Command {
@@ -45,25 +42,10 @@ func putAction(cmd *cobra.Command, args []string) {
 		log.Fatalf("open file err: %s", err)
 	}
 
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	batcher, err := client.NewBatch()
 	if err != nil {
@@ -99,25 +81,10 @@ func setRootAction(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	hash := args[0]
 	if len(hash) != 64 {
@@ -155,25 +122,10 @@ func putBlobAction(cmd *cobra.Command, args []string) {
 	name = strings.TrimSuffix(name, ext)
 	ext = strings.TrimPrefix(ext, ".")
 
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	f, err := os.Open(fileName)
 	if err != nil {

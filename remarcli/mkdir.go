@@ -2,12 +2,9 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 
-	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 )
 
 func mkDirCommand() *cobra.Command {
@@ -21,7 +18,7 @@ func mkDirCommand() *cobra.Command {
 }
 
 func mkDirAction(cmd *cobra.Command, args []string) {
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
@@ -31,21 +28,6 @@ func mkDirAction(cmd *cobra.Command, args []string) {
 	}
 
 	path := args[0]
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	batcher, err := client.NewBatch()
 	if err != nil {

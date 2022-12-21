@@ -3,12 +3,9 @@ package main
 import (
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"log"
 
-	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 )
 
 func treeCommand() *cobra.Command {
@@ -21,25 +18,10 @@ func treeCommand() *cobra.Command {
 }
 
 func treeAction(cmd *cobra.Command, args []string) {
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	tree, err := client.FSSnapshot()
 	if err != nil {

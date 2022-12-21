@@ -2,13 +2,10 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 
-	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 )
 
 func rmCommand() *cobra.Command {
@@ -29,25 +26,10 @@ func rmAction(cmd *cobra.Command, args []string) {
 
 	fileName := args[0]
 
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	batcher, err := client.NewBatch()
 	if err != nil {

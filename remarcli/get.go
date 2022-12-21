@@ -2,14 +2,11 @@ package main
 
 import (
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
 
-	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 )
 
 func getBlobCommand() *cobra.Command {
@@ -23,7 +20,7 @@ func getBlobCommand() *cobra.Command {
 }
 
 func getBlobAction(cmd *cobra.Command, args []string) {
-	content, err := ioutil.ReadFile("/home/psanford/.rmapi")
+	client, err := newClient()
 	if err != nil {
 		panic(err)
 	}
@@ -37,21 +34,6 @@ func getBlobAction(cmd *cobra.Command, args []string) {
 	// allow pasting a full entry here for convenience
 	fields := strings.Split(id, ":")
 	id = fields[0]
-
-	var tokens AuthTokens
-	err = yaml.Unmarshal(content, &tokens)
-	if err != nil {
-		panic(err)
-	}
-
-	creds := remarkablecloud.NewStaticTokenProvider(tokens.DeviceToken, tokens.UserToken)
-
-	err = creds.(refreshable).Refresh()
-	if err != nil {
-		panic(err)
-	}
-
-	client := remarkablecloud.New(creds)
 
 	resp, err := client.GetBlob(id)
 	if err != nil {
