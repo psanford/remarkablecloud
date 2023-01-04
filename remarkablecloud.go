@@ -26,8 +26,8 @@ var (
 	DeleteAPI    = "/document-storage/json/2/delete"
 	UploadReqAPI = "/document-storage/json/2/upload/request"
 
-	DownloadURL = "https://rm-blob-storage-prod.appspot.com/api/v1/signed-urls/downloads"
-	UploadURL   = "https://rm-blob-storage-prod.appspot.com/api/v1/signed-urls/uploads"
+	DownloadURL = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/downloads"
+	UploadURL   = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/uploads"
 
 	schemaVersion = "3"
 )
