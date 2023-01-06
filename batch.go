@@ -672,6 +672,8 @@ func (b *Batch) Commit() (*PutResult, error) {
 
 	var putNewRoot bool
 
+	var newGeneration int
+
 	for i, change := range b.pendingPuts {
 		if change.isRootListing && i < lastRootListingIdx {
 			continue
@@ -690,9 +692,18 @@ func (b *Batch) Commit() (*PutResult, error) {
 		return nil, fmt.Errorf("did not put a new root index listing")
 	}
 
-	err := b.c.PutBlob("root", bytes.NewReader([]byte(b.curRootHash)), WithGeneration(b.generation))
+	err := b.c.PutBlob("root", bytes.NewReader([]byte(b.curRootHash)),
+		WithGeneration(b.generation),
+		WithCaptureGeneration(&newGeneration),
+		WithCurrentHash(b.curRootHash),
+	)
+
+	if newGeneration == 0 {
+		return nil, fmt.Errorf("did not get new generation id")
+	}
+	err = b.c.SyncRoot(newGeneration)
 	if err != nil {
-		return nil, fmt.Errorf("put new root err: %s", err)
+		return nil, fmt.Errorf("syncroot err: %s", err)
 	}
 
 	return &PutResult{

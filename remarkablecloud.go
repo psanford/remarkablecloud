@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"io/ioutil"
 	"net/http"
+	"net/http/httputil"
 	"path"
 	"strconv"
 	"strings"
@@ -26,8 +27,11 @@ var (
 	DeleteAPI    = "/document-storage/json/2/delete"
 	UploadReqAPI = "/document-storage/json/2/upload/request"
 
-	DownloadURL = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/downloads"
-	UploadURL   = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/uploads"
+	DownloadURL     = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/downloads"
+	UploadURL       = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/uploads"
+	SyncCompleteURL = "https://internal.cloud.remarkable.com/sync/v2/sync-complete"
+
+	DebugLogFunc func(string, ...interface{})
 
 	schemaVersion = "3"
 )
@@ -50,11 +54,21 @@ func (c *Client) GetBlob(id string) (*http.Response, error) {
 	}
 	req.Header.Set("authorization", "Bearer "+c.creds.Token())
 
+	if DebugLogFunc != nil {
+		debugReq, _ := httputil.DumpRequest(req, true)
+		DebugLogFunc("GetBlogMeta req <%s>", debugReq)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	if DebugLogFunc != nil {
+		debugResp, _ := httputil.DumpResponse(resp, true)
+		DebugLogFunc("GetBlob resp: %s", debugResp)
+	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -66,7 +80,12 @@ func (c *Client) GetBlob(id string) (*http.Response, error) {
 		return nil, fmt.Errorf("Invalid response json: %q, %s", err, body)
 	}
 
-	return http.Get(data.URL)
+	resp, err = http.Get(data.URL)
+	if DebugLogFunc != nil {
+		debugResp, _ := httputil.DumpResponse(resp, true)
+		DebugLogFunc("GetBlob Data %s resp: %s", data.URL, debugResp)
+	}
+	return resp, err
 }
 
 type rawListResult struct {
@@ -243,8 +262,10 @@ func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
 }
 
 type putBlobOptions struct {
-	generation    string
-	isRootListing bool
+	generation        int
+	currentHash       string
+	captureGeneration *int
+	isRootListing     bool
 }
 
 type PutBlobOption func(opt *putBlobOptions)
@@ -258,6 +279,7 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		Method:       "PUT",
 		RelativePath: key,
 		Generation:   options.generation,
+		RootSchema:   options.currentHash,
 	}
 
 	putReqJson, err := json.Marshal(putReq)
@@ -270,11 +292,23 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		return err
 	}
 	req.Header.Set("authorization", "Bearer "+c.creds.Token())
+
+	if DebugLogFunc != nil {
+		debugReq, _ := httputil.DumpRequest(req, true)
+		DebugLogFunc("PutBlobMeta <%s>", debugReq)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
+	if DebugLogFunc != nil {
+		debugResp, _ := httputil.DumpResponse(resp, true)
+		DebugLogFunc("PutBlobMeta Result <%s>", debugResp)
+	}
+
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -285,22 +319,105 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		return fmt.Errorf("Invalid response json: %q, %s", err, body)
 	}
 
+	if data.Error != "" {
+		return fmt.Errorf("Put err for req=%q, err=%w", putReqJson, err)
+	}
+
 	req, err = http.NewRequest("PUT", data.URL, r)
 	if err != nil {
-		return fmt.Errorf("PUT req err: %w", err)
+		return fmt.Errorf("PUT req err: %w, body=%s", err, body)
 	}
 
-	if options.generation != "" {
-		req.Header.Add("x-goog-if-generation-match", options.generation)
+	if options.generation != 0 {
+		req.Header.Add("x-goog-if-generation-match", strconv.Itoa(options.generation))
 	}
 
-	_, err = http.DefaultClient.Do(req)
+	req.Header.Add("x-goog-content-length-range", fmt.Sprintf("0,%d", data.MaxuploadsizeBytes))
+
+	if DebugLogFunc != nil {
+		debugReq, _ := httputil.DumpRequest(req, true)
+		DebugLogFunc("PutBlobData <%s>", debugReq)
+	}
+
+	resp, err = http.DefaultClient.Do(req)
+
+	if DebugLogFunc != nil {
+		debugResp, _ := httputil.DumpResponse(resp, true)
+		DebugLogFunc("PutBlobData Result <%s>", debugResp)
+	}
+
+	if resp.StatusCode != 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("Non-200 error: %d body: %s", resp.StatusCode, body)
+	}
+
+	if options.captureGeneration != nil {
+		genStr := resp.Header.Get("x-goog-generation")
+		generation, _ := strconv.Atoi(genStr)
+		*options.captureGeneration = generation
+	}
+
 	return err
+}
+
+func (c *Client) SyncRoot(generationID int) error {
+	syncCompleteReq := syncCompleteRequest{
+		Generation: generationID,
+	}
+
+	reqJson, err := json.Marshal(syncCompleteReq)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", SyncCompleteURL, bytes.NewBuffer(reqJson))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "Bearer "+c.creds.Token())
+
+	if DebugLogFunc != nil {
+		debugReq, _ := httputil.DumpRequest(req, true)
+		DebugLogFunc("SyncRoot Req <%s>", debugReq)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	if DebugLogFunc != nil {
+		debugReq, _ := httputil.DumpResponse(resp, true)
+		DebugLogFunc("SyncRoot Resp <%s>", debugReq)
+	}
+
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if string(body) != "OK" {
+		return fmt.Errorf("SyncRoot unexpected response=%q", body)
+	}
+	return nil
 }
 
 func WithGeneration(gen int) PutBlobOption {
 	return func(opt *putBlobOptions) {
-		opt.generation = strconv.Itoa(gen)
+		opt.generation = gen
+	}
+}
+
+func WithCaptureGeneration(gen *int) PutBlobOption {
+	return func(opt *putBlobOptions) {
+		opt.captureGeneration = gen
+	}
+}
+
+func WithCurrentHash(currentHash string) PutBlobOption {
+	return func(opt *putBlobOptions) {
+		opt.currentHash = currentHash
 	}
 }
 
@@ -468,16 +585,28 @@ type contentDocTransform struct {
 }
 
 type storageResp struct {
-	Expires      string `json:"expires"`
-	Method       string `json:"method"`
-	RelativePath string `json:"relative_path"`
-	URL          string `json:"url"`
+	Expires            string `json:"expires"`
+	Method             string `json:"method"`
+	RelativePath       string `json:"relative_path"`
+	URL                string `json:"url"`
+	Error              string `json:"error"`
+	MaxuploadsizeBytes int    `json:"maxuploadsize_bytes"`
 }
 
 type storageRequest struct {
 	RelativePath string `json:"relative_path"`
 	Method       string `json:"http_method"`
-	Generation   string `json:"generation,omitempty"`
+	Generation   int    `json:"generation,omitempty"`
+	RootSchema   string `json:"root_schema,omitempty"`
+}
+
+type syncCompleteRequest struct {
+	Generation int `json:"generation"`
+}
+
+type syncCompleteResponse struct {
+	Message    string `json:"message"`
+	StatusCode int    `json:"code"`
 }
 
 type blobMetadata struct {
