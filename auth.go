@@ -2,7 +2,7 @@ package remarkablecloud
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 )
 
@@ -50,7 +50,7 @@ func (s *staticCredential) Refresh() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("read body err: %w", err)
 	}

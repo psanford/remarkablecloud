@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -61,7 +60,7 @@ func (b *Batch) GetAndCacheBlob(id string) (*http.Response, error) {
 		}
 		defer r.Body.Close()
 
-		body, err := ioutil.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return nil, err
 		}
@@ -111,7 +110,7 @@ func (b *Batch) rawList() (*rawListResult, error) {
 	genStr := resp.Header.Get("x-goog-generation")
 	generation, _ := strconv.Atoi(genStr)
 
-	rootBlobID, err := ioutil.ReadAll(resp.Body)
+	rootBlobID, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +227,7 @@ func (b *Batch) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		opt(&options)
 	}
 
-	content, err := ioutil.ReadAll(r)
+	content, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}

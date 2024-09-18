@@ -1,14 +1,14 @@
 package main
 
 import (
-	"io/ioutil"
+	"os"
 
 	"github.com/psanford/remarkablecloud"
 	"gopkg.in/yaml.v2"
 )
 
 func newClient() (*remarkablecloud.Client, error) {
-	content, err := ioutil.ReadFile("/home/psanford/.config/rmapi/rmapi.conf")
+	content, err := os.ReadFile("/home/psanford/.config/rmapi/rmapi.conf")
 	if err != nil {
 		return nil, err
 	}

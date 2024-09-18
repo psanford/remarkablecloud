@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"path"
@@ -70,7 +69,7 @@ func (c *Client) GetBlob(id string) (*http.Response, error) {
 		DebugLogFunc("GetBlob resp: %s", debugResp)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +103,7 @@ func (c *Client) rawList() (*rawListResult, error) {
 	genStr := resp.Header.Get("x-goog-generation")
 	generation, _ := strconv.Atoi(genStr)
 
-	rootBlobID, err := ioutil.ReadAll(resp.Body)
+	rootBlobID, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +308,7 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		DebugLogFunc("PutBlobMeta Result <%s>", debugResp)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -347,7 +346,7 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 	}
 
 	if resp.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("Non-200 error: %d body: %s", resp.StatusCode, body)
 	}
 
@@ -392,7 +391,7 @@ func (c *Client) SyncRoot(generationID int) error {
 	}
 
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
