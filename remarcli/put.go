@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/psanford/remarkablecloud"
 	"github.com/spf13/cobra"
 )
 
@@ -65,39 +66,10 @@ func putAction(cmd *cobra.Command, args []string) {
 	fmt.Printf("put success! id=%s %+v\n", putResult.DocID, result)
 }
 
-func setRootCommand() *cobra.Command {
-	cmd := cobra.Command{
-		Use:   "set-root <hash>",
-		Short: "set root to specified hash",
-		Run:   setRootAction,
-	}
-	return &cmd
-}
-
-func setRootAction(cmd *cobra.Command, args []string) {
-	if len(args) < 1 {
-		log.Printf("hash is required")
-		cmd.Usage()
-		os.Exit(1)
-	}
-
-	client, err := newClient()
-	if err != nil {
-		panic(err)
-	}
-
-	hash := args[0]
-	if len(hash) != 64 {
-		log.Fatalf("expected hash to be 64 chars but was %d", len(hash))
-	}
-
-	err = client.PutBlob("root", bytes.NewReader([]byte(hash)))
-	if err != nil {
-		log.Fatalf("put blob err: %s", err)
-	}
-
-	fmt.Printf("putBlob success!\n")
-}
+var (
+	fileUUIDFlag string
+	fileExtFlag  string
+)
 
 func putBlobCommand() *cobra.Command {
 	cmd := cobra.Command{
@@ -105,6 +77,10 @@ func putBlobCommand() *cobra.Command {
 		Short: "PutBlob file",
 		Run:   putBlobAction,
 	}
+
+	cmd.Flags().StringVarP(&fileUUIDFlag, "uuid", "", "", "Set file uuid")
+	cmd.Flags().StringVarP(&fileExtFlag, "ext", "", "", "Set file extension")
+
 	return &cmd
 }
 
@@ -146,7 +122,27 @@ func putBlobAction(cmd *cobra.Command, args []string) {
 
 	key := hex.EncodeToString(h.Sum(nil))
 
-	err = client.PutBlob(key, f)
+	uuid, err := uuid.NewRandom()
+	if err != nil {
+		panic(err)
+	}
+	uuidStr := uuid.String()
+	if fileUUIDFlag != "" {
+		uuidStr = fileUUIDFlag
+	}
+
+	if fileExtFlag != "" {
+		uuidStr += "." + fileExtFlag
+	} else if ext == "pdf" || ext == "epub" {
+		uuidStr += "." + ext
+	}
+
+	req := remarkablecloud.RawPubBlobRequest{
+		Key:      key,
+		Filename: uuidStr,
+		Content:  f,
+	}
+	err = client.RawPutBlob(req)
 	if err != nil {
 		log.Fatalf("PutBlob file err: %s", err)
 	}

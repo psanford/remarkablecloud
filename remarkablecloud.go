@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"log"
@@ -47,7 +49,7 @@ func New(creds CredentialProvider) *Client {
 func (c *Client) Do(op string, req *http.Request) (*http.Response, error) {
 	req.Header.Set("authorization", "Bearer "+c.creds.Token())
 	if DebugLogFunc != nil {
-		debugReq, _ := httputil.DumpRequest(req, true)
+		debugReq, _ := httputil.DumpRequestOut(req, true)
 		DebugLogFunc("%s req\n<%s>\n", op, debugReq)
 	}
 
@@ -83,7 +85,7 @@ type rawListResult struct {
 	rootHash     string
 }
 
-func (c *Client) getRoot() (*rootResp, error) {
+func (c *Client) getRoot() (*RootMetadata, error) {
 	req, err := http.NewRequest("GET", RootURL, nil)
 	if err != nil {
 		return nil, err
@@ -98,7 +100,7 @@ func (c *Client) getRoot() (*rootResp, error) {
 	if err != nil {
 		return nil, err
 	}
-	var root rootResp
+	var root RootMetadata
 	err = json.Unmarshal(rootTxt, &root)
 	if err != nil {
 		return nil, err
@@ -263,35 +265,57 @@ func readBlobIndex(r io.Reader) ([]blobMetadata, error) {
 }
 
 type putBlobOptions struct {
-	generation        int
-	currentHash       string
-	captureGeneration *int
-	isRootListing     bool
+	generation    int
+	currentHash   string
+	isRootListing bool
+	xGoogHash     string
 }
 
 type PutBlobOption func(opt *putBlobOptions)
 
-func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
+type RawPubBlobRequest struct {
+	// Sha256 of the content
+	Key string
+	// Remarkable filename (uuid.extension)
+	Filename   string
+	ParentHash string
+	Content    io.ReadSeeker
+}
+
+func (c *Client) RawPutBlob(r RawPubBlobRequest, opts ...PutBlobOption) error {
 	var options putBlobOptions
 	for _, opt := range opts {
 		opt(&options)
 	}
-	putReq := storageRequest{
-		Method:       "PUT",
-		RelativePath: key,
-		Generation:   options.generation,
-		RootSchema:   options.currentHash,
-	}
 
-	putReqJson, err := json.Marshal(putReq)
+	req, err := http.NewRequest("PUT", FileURLPrefix+r.Key, r.Content)
 	if err != nil {
 		return err
 	}
 
-	req, err := http.NewRequest("POST", UploadURL, bytes.NewBuffer(putReqJson))
+	if r.Filename != "" {
+		req.Header.Add("Rm-Filename", r.Filename)
+	}
+	if r.ParentHash != "" {
+		req.Header.Add("Rm-Parent-Hash", r.ParentHash)
+	}
+
+	crc32cHash := crc32.New(crc32.MakeTable(crc32.Castagnoli))
+	size, err := io.Copy(crc32cHash, r.Content)
 	if err != nil {
 		return err
 	}
+
+	sum := crc32cHash.Sum(nil)
+	crc32cBase64 := base64.StdEncoding.EncodeToString(sum)
+	req.Header.Set("X-Goog-Hash", fmt.Sprintf("crc32c=%s", crc32cBase64))
+	req.ContentLength = size
+
+	_, err = r.Content.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
 	resp, err := c.Do("PutBlob", req)
 	if err != nil {
 		return err
@@ -303,99 +327,44 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 		return err
 	}
 
-	var data storageResp
-	if err := json.Unmarshal(body, &data); err != nil {
-		return fmt.Errorf("Invalid response json: %q, %s", err, body)
-	}
-
-	if data.Error != "" {
-		return fmt.Errorf("Put err for req=%q, err=%w", putReqJson, err)
-	}
-
-	req, err = http.NewRequest("PUT", data.URL, r)
-	if err != nil {
-		return fmt.Errorf("PUT req err: %w, body=%s", err, body)
-	}
-
-	if options.generation != 0 {
-		req.Header.Add("x-goog-if-generation-match", strconv.Itoa(options.generation))
-	}
-
-	req.Header.Add("x-goog-content-length-range", fmt.Sprintf("0,%d", data.MaxuploadsizeBytes))
-
-	if DebugLogFunc != nil {
-		debugReq, _ := httputil.DumpRequest(req, true)
-		DebugLogFunc("PutBlobData <%s>", debugReq)
-	}
-
-	resp, err = http.DefaultClient.Do(req)
-
-	if DebugLogFunc != nil {
-		debugResp, _ := httputil.DumpResponse(resp, true)
-		DebugLogFunc("PutBlobData Result <%s>", debugResp)
-	}
-
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Non-200 error: %d body: %s", resp.StatusCode, body)
-	}
-
-	if options.captureGeneration != nil {
-		genStr := resp.Header.Get("x-goog-generation")
-		generation, _ := strconv.Atoi(genStr)
-		*options.captureGeneration = generation
+		return fmt.Errorf("put blob non-200 response: %d %s", resp.StatusCode, body)
 	}
 
 	return err
 }
 
-func (c *Client) SyncRoot(generationID int) error {
-	syncCompleteReq := syncCompleteRequest{
-		Generation: generationID,
+func (c *Client) PutRoot(root RootMetadata) (*RootMetadata, error) {
+	reqJson, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
 	}
 
-	reqJson, err := json.Marshal(syncCompleteReq)
+	req, err := http.NewRequest("PUT", RootURL, bytes.NewBuffer(reqJson))
 	if err != nil {
-		return err
+		return nil, err
 	}
+	req.Header.Set("Rm-Filename", "roothash")
+	req.ContentLength = int64(len(reqJson))
 
-	req, err := http.NewRequest("POST", SyncCompleteURL, bytes.NewBuffer(reqJson))
+	resp, err := c.Do("PutRoot", req)
 	if err != nil {
-		return err
-	}
-	resp, err := c.Do("SyncRoot", req)
-	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if string(body) != "OK" {
-		return fmt.Errorf("SyncRoot unexpected response=%q", body)
+	var out RootMetadata
+	err = json.Unmarshal(body, &out)
+	if err != nil {
+		return nil, err
 	}
-	return nil
-}
 
-func WithGeneration(gen int) PutBlobOption {
-	return func(opt *putBlobOptions) {
-		opt.generation = gen
-	}
-}
-
-func WithCaptureGeneration(gen *int) PutBlobOption {
-	return func(opt *putBlobOptions) {
-		opt.captureGeneration = gen
-	}
-}
-
-func WithCurrentHash(currentHash string) PutBlobOption {
-	return func(opt *putBlobOptions) {
-		opt.currentHash = currentHash
-	}
+	return &out, nil
 }
 
 func hashKey(r io.ReadSeeker) (string, error) {
@@ -594,10 +563,11 @@ type blobMetadata struct {
 	size      int
 }
 
-type rootResp struct {
+type RootMetadata struct {
 	Hash          string `json:"hash"`
 	Generation    int64  `json:"generation"`
-	SchemaVersion int64  `json:"schemaVersion"`
+	SchemaVersion int64  `json:"schemaVersion,omitempty"`
+	Broadcast     bool   `json:"broadcast,omitempty"`
 }
 
 func (m *blobMetadata) String() string {

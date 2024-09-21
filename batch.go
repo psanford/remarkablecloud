@@ -34,9 +34,9 @@ type Batch struct {
 }
 
 type pendingPut struct {
-	key           string
-	content       []byte
-	isRootListing bool
+	hashKey string
+	id      string
+	content []byte
 }
 
 type batchBlob struct {
@@ -49,7 +49,7 @@ func (b *Batch) GetAndCacheBlob(id string) (*http.Response, error) {
 	b.mu.Lock()
 	existing, found := b.blobs[id]
 	if found && id == "root" {
-		rootDoc := rootResp{
+		rootDoc := RootMetadata{
 			Hash:       b.curRootHash,
 			Generation: int64(b.generation),
 		}
@@ -82,7 +82,7 @@ func (b *Batch) GetAndCacheBlob(id string) (*http.Response, error) {
 		b.mu.Lock()
 		b.blobs[id] = existing
 		if id == "root" {
-			var rootDoc rootResp
+			var rootDoc RootMetadata
 			err = json.Unmarshal(body, &rootDoc)
 			if err != nil {
 				panic(err)
@@ -121,7 +121,7 @@ func (b *Batch) rawList() (*rawListResult, error) {
 		return nil, err
 	}
 
-	var rootMeta rootResp
+	var rootMeta RootMetadata
 	dec := json.NewDecoder(resp.Body)
 	err = dec.Decode(&rootMeta)
 	if err != nil {
@@ -228,13 +228,11 @@ OUTER:
 	}, nil
 }
 
-func withRootListing() PutBlobOption {
-	return func(opt *putBlobOptions) {
-		opt.isRootListing = true
-	}
+func (b *Batch) UpdateRootHash(hashKey string) {
+	b.curRootHash = hashKey
 }
 
-func (b *Batch) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
+func (b *Batch) PutBlob(hashKey, id string, r io.Reader, opts ...PutBlobOption) error {
 	var options putBlobOptions
 	for _, opt := range opts {
 		opt(&options)
@@ -248,20 +246,17 @@ func (b *Batch) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.blobs[key] = batchBlob{
+	b.blobs[hashKey] = batchBlob{
 		data:   content,
 		status: 200,
 	}
 
-	if key == "root" {
-		b.curRootHash = string(content)
-	} else {
-		b.pendingPuts = append(b.pendingPuts, pendingPut{
-			key:           key,
-			content:       content,
-			isRootListing: options.isRootListing,
-		})
-	}
+	b.pendingPuts = append(b.pendingPuts, pendingPut{
+		hashKey: hashKey,
+		id:      id,
+		content: content,
+	})
+
 	return nil
 }
 
@@ -271,7 +266,7 @@ func (b *Batch) putBlobWithHashedContent(id string, r io.ReadSeeker) (*blobMetad
 		return nil, err
 	}
 
-	err = b.PutBlob(key, r)
+	err = b.PutBlob(key, id, r)
 	if err != nil {
 		return nil, err
 	}
@@ -392,11 +387,11 @@ func (b *Batch) putListing(id string, blobs []blobMetadata) (*blobMetadata, erro
 
 	r := bytes.NewReader(buf.Bytes())
 
-	var opts []PutBlobOption
 	if id == "" {
-		opts = append(opts, withRootListing())
+		return nil, fmt.Errorf("putListing id cannot be empty string")
 	}
-	err := b.PutBlob(key, r, opts...)
+
+	err := b.PutBlob(key, id, r)
 	if err != nil {
 		return nil, err
 	}
@@ -412,6 +407,10 @@ func (b *Batch) putListing(id string, blobs []blobMetadata) (*blobMetadata, erro
 	return &ret, nil
 }
 
+// Add a file to the batch for uploading.
+// p is the name of the file on the device. It can be a path.
+// ext is the file extension. The only values are "epub" and "pdf".
+// r is a ReadSeeker of the actual content.
 func (b *Batch) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
 	raw, err := b.rawList()
 	if err != nil {
@@ -499,20 +498,16 @@ func (b *Batch) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
 
 	rawEntries = append(rawEntries, *listingMeta)
 
-	rootMata, err := b.putListing("", rawEntries)
+	rootMeta, err := b.putListing(RootListingID, rawEntries)
 	if err != nil {
 		return nil, fmt.Errorf("put root listing err: %w", err)
 	}
 
-	err = b.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
+	b.UpdateRootHash(rootMeta.hash)
 
 	result := PutResult{
 		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
+		NewRootHash: rootMeta.hash,
 		DocID:       id,
 	}
 
@@ -588,20 +583,16 @@ func (b *Batch) Mkdir(p string) (*PutResult, error) {
 
 	rawEntries = append(rawEntries, *listingMeta)
 
-	rootMata, err := b.putListing("", rawEntries)
+	rootMeta, err := b.putListing(RootListingID, rawEntries)
 	if err != nil {
 		return nil, fmt.Errorf("put root listing err: %w", err)
 	}
 
-	err = b.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
+	b.UpdateRootHash(rootMeta.hash)
 
 	result := PutResult{
 		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
+		NewRootHash: rootMeta.hash,
 		DocID:       id,
 	}
 
@@ -648,25 +639,23 @@ func (b *Batch) Remove(name string) (*PutResult, error) {
 
 	index = append(index[:matchingIdx], index[matchingIdx+1:]...)
 
-	rootMata, err := b.putListing("", index)
+	rootMeta, err := b.putListing(RootListingID, index)
 	if err != nil {
 		return nil, fmt.Errorf("put root listing err: %w", err)
 	}
 
-	err = b.PutBlob("root", bytes.NewReader([]byte(rootMata.hash)), WithGeneration(raw.generation))
-
-	if err != nil {
-		return nil, fmt.Errorf("put root ptr err: %w", err)
-	}
+	b.UpdateRootHash(rootMeta.hash)
 
 	result := PutResult{
 		OldRootHash: raw.rootHash,
-		NewRootHash: rootMata.hash,
+		NewRootHash: rootMeta.hash,
 		DocID:       item.ID,
 	}
 
 	return &result, nil
 }
+
+var RootListingID = "root.docSchema"
 
 func (b *Batch) Commit() (*PutResult, error) {
 	if b.curRootHash == b.origRootHash {
@@ -674,7 +663,7 @@ func (b *Batch) Commit() (*PutResult, error) {
 	}
 	lastRootListingIdx := -1
 	for i, change := range b.pendingPuts {
-		if change.isRootListing {
+		if change.id == RootListingID {
 			lastRootListingIdx = i
 		}
 	}
@@ -684,18 +673,22 @@ func (b *Batch) Commit() (*PutResult, error) {
 
 	var putNewRoot bool
 
-	var newGeneration int
-
 	for i, change := range b.pendingPuts {
-		if change.isRootListing && i < lastRootListingIdx {
+		if change.id == RootListingID && i < lastRootListingIdx {
 			continue
 		}
 
-		err := b.c.PutBlob(change.key, bytes.NewReader(change.content))
-		if err != nil {
-			return nil, fmt.Errorf("put blob %s err: %s", change.key, err)
+		putReq := RawPubBlobRequest{
+			Key:      change.hashKey,
+			Filename: change.id,
+			Content:  bytes.NewReader(change.content),
 		}
-		if change.key == b.curRootHash {
+
+		err := b.c.RawPutBlob(putReq)
+		if err != nil {
+			return nil, fmt.Errorf("put blob %s err: %s", change.hashKey, err)
+		}
+		if change.hashKey == b.curRootHash {
 			putNewRoot = true
 		}
 	}
@@ -704,19 +697,16 @@ func (b *Batch) Commit() (*PutResult, error) {
 		return nil, fmt.Errorf("did not put a new root index listing")
 	}
 
-	err := b.c.PutBlob("root", bytes.NewReader([]byte(b.curRootHash)),
-		WithGeneration(b.generation),
-		WithCaptureGeneration(&newGeneration),
-		WithCurrentHash(b.curRootHash),
-	)
-
-	if newGeneration == 0 {
-		return nil, fmt.Errorf("did not get new generation id")
-	}
-	err = b.c.SyncRoot(newGeneration)
+	resp, err := b.c.PutRoot(RootMetadata{
+		Hash:       b.curRootHash,
+		Generation: int64(b.generation),
+		Broadcast:  true,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("syncroot err: %s", err)
+		return nil, fmt.Errorf("put root ptr err: %w", err)
 	}
+
+	b.generation = int(resp.Generation)
 
 	return &PutResult{
 		OldRootHash: b.origRootHash,

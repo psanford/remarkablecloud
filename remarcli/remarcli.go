@@ -23,7 +23,6 @@ func main() {
 	rootCmd.AddCommand(putCommand())
 	rootCmd.AddCommand(putBlobCommand())
 	rootCmd.AddCommand(mkDirCommand())
-	rootCmd.AddCommand(setRootCommand())
 	rootCmd.AddCommand(rmCommand())
 	rootCmd.AddCommand(getBlobCommand())
 
