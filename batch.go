@@ -49,7 +49,15 @@ func (b *Batch) GetAndCacheBlob(id string) (*http.Response, error) {
 	b.mu.Lock()
 	existing, found := b.blobs[id]
 	if found && id == "root" {
-		existing.data = []byte(b.curRootHash)
+		rootDoc := rootResp{
+			Hash:       b.curRootHash,
+			Generation: int64(b.generation),
+		}
+		data, err := json.Marshal(rootDoc)
+		if err != nil {
+			return nil, err
+		}
+		existing.data = data
 	}
 	b.mu.Unlock()
 
@@ -74,7 +82,13 @@ func (b *Batch) GetAndCacheBlob(id string) (*http.Response, error) {
 		b.mu.Lock()
 		b.blobs[id] = existing
 		if id == "root" {
-			b.curRootHash = string(body)
+			var rootDoc rootResp
+			err = json.Unmarshal(body, &rootDoc)
+			if err != nil {
+				panic(err)
+			}
+			b.curRootHash = rootDoc.Hash
+			b.generation = int(rootDoc.Generation)
 		}
 
 		b.mu.Unlock()
@@ -107,15 +121,14 @@ func (b *Batch) rawList() (*rawListResult, error) {
 		return nil, err
 	}
 
-	genStr := resp.Header.Get("x-goog-generation")
-	generation, _ := strconv.Atoi(genStr)
-
-	rootBlobID, err := io.ReadAll(resp.Body)
+	var rootMeta rootResp
+	dec := json.NewDecoder(resp.Body)
+	err = dec.Decode(&rootMeta)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err = b.GetAndCacheBlob(string(rootBlobID))
+	resp, err = b.GetAndCacheBlob(string(rootMeta.Hash))
 	if err != nil {
 		return nil, err
 	}
@@ -210,8 +223,8 @@ OUTER:
 	return &rawListResult{
 		items:        items,
 		blobMetadata: entries,
-		generation:   generation,
-		rootHash:     string(rootBlobID),
+		generation:   int(rootMeta.Generation),
+		rootHash:     rootMeta.Hash,
 	}, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"path"
@@ -29,6 +30,8 @@ var (
 	DownloadURL     = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/downloads"
 	UploadURL       = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/uploads"
 	SyncCompleteURL = "https://internal.cloud.remarkable.com/sync/v2/sync-complete"
+	RootURL         = "https://internal.cloud.remarkable.com/sync/v3/root"
+	FileURLPrefix   = "https://internal.cloud.remarkable.com/sync/v3/files/"
 
 	DebugLogFunc func(string, ...interface{})
 
@@ -41,50 +44,36 @@ func New(creds CredentialProvider) *Client {
 	}
 }
 
-func (c *Client) GetBlob(id string) (*http.Response, error) {
-	var metaReq = storageRequest{
-		Method:       "GET",
-		RelativePath: id,
-	}
-	reqJson, _ := json.Marshal(metaReq)
-	req, err := http.NewRequest("POST", DownloadURL, bytes.NewReader(reqJson))
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) Do(op string, req *http.Request) (*http.Response, error) {
 	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-
 	if DebugLogFunc != nil {
 		debugReq, _ := httputil.DumpRequest(req, true)
-		DebugLogFunc("GetBlogMeta req <%s>", debugReq)
+		DebugLogFunc("%s req\n<%s>\n", op, debugReq)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	if DebugLogFunc != nil {
-		debugResp, _ := httputil.DumpResponse(resp, true)
-		DebugLogFunc("GetBlob resp: %s", debugResp)
+		debugResp, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			log.Fatalf("DumpResponse err: %s", err)
+		}
+		DebugLogFunc("%s resp\n<%s>\n", op, debugResp)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	return resp, err
+}
+
+func (c *Client) GetBlob(id string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", FileURLPrefix+id, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	var data storageResp
-	if err := json.Unmarshal(body, &data); err != nil {
-		return nil, fmt.Errorf("Invalid response json: %q, %s", err, body)
-	}
-
-	resp, err = http.Get(data.URL)
-	if DebugLogFunc != nil {
-		debugResp, _ := httputil.DumpResponse(resp, true)
-		DebugLogFunc("GetBlob Data %s resp: %s", data.URL, debugResp)
-	}
-	return resp, err
+	return c.Do("GetBlob", req)
 }
 
 type rawListResult struct {
@@ -94,21 +83,34 @@ type rawListResult struct {
 	rootHash     string
 }
 
+func (c *Client) getRoot() (*rootResp, error) {
+	req, err := http.NewRequest("GET", RootURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.Do("getRoot", req)
+	if err != nil {
+		return nil, err
+	}
+
+	rootTxt, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var root rootResp
+	err = json.Unmarshal(rootTxt, &root)
+	if err != nil {
+		return nil, err
+	}
+
+	return &root, nil
+}
+
 func (c *Client) rawList() (*rawListResult, error) {
-	resp, err := c.GetBlob("root")
-	if err != nil {
-		return nil, err
-	}
+	root, err := c.getRoot()
 
-	genStr := resp.Header.Get("x-goog-generation")
-	generation, _ := strconv.Atoi(genStr)
-
-	rootBlobID, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err = c.GetBlob(string(rootBlobID))
+	resp, err := c.GetBlob(root.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -203,8 +205,8 @@ OUTER:
 	return &rawListResult{
 		items:        items,
 		blobMetadata: entries,
-		generation:   generation,
-		rootHash:     string(rootBlobID),
+		generation:   int(root.Generation),
+		rootHash:     root.Hash,
 	}, nil
 }
 
@@ -290,23 +292,11 @@ func (c *Client) PutBlob(key string, r io.Reader, opts ...PutBlobOption) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-
-	if DebugLogFunc != nil {
-		debugReq, _ := httputil.DumpRequest(req, true)
-		DebugLogFunc("PutBlobMeta <%s>", debugReq)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do("PutBlob", req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
-	if DebugLogFunc != nil {
-		debugResp, _ := httputil.DumpResponse(resp, true)
-		DebugLogFunc("PutBlobMeta Result <%s>", debugResp)
-	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -373,21 +363,9 @@ func (c *Client) SyncRoot(generationID int) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("authorization", "Bearer "+c.creds.Token())
-
-	if DebugLogFunc != nil {
-		debugReq, _ := httputil.DumpRequest(req, true)
-		DebugLogFunc("SyncRoot Req <%s>", debugReq)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.Do("SyncRoot", req)
 	if err != nil {
 		return err
-	}
-
-	if DebugLogFunc != nil {
-		debugReq, _ := httputil.DumpResponse(resp, true)
-		DebugLogFunc("SyncRoot Resp <%s>", debugReq)
 	}
 
 	defer resp.Body.Close()
@@ -614,6 +592,12 @@ type blobMetadata struct {
 	blobType  string
 	fileCount int
 	size      int
+}
+
+type rootResp struct {
+	Hash          string `json:"hash"`
+	Generation    int64  `json:"generation"`
+	SchemaVersion int64  `json:"schemaVersion"`
 }
 
 func (m *blobMetadata) String() string {
