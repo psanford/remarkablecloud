@@ -23,17 +23,8 @@ import (
 )
 
 var (
-	APIHost      = "https://document-storage-production-dot-remarkable-production.appspot.com"
-	ListAPI      = "/document-storage/json/2/docs"
-	UpdateAPI    = "/document-storage/json/2/upload/update-status"
-	DeleteAPI    = "/document-storage/json/2/delete"
-	UploadReqAPI = "/document-storage/json/2/upload/request"
-
-	DownloadURL     = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/downloads"
-	UploadURL       = "https://internal.cloud.remarkable.com/sync/v2/signed-urls/uploads"
-	SyncCompleteURL = "https://internal.cloud.remarkable.com/sync/v2/sync-complete"
-	RootURL         = "https://internal.cloud.remarkable.com/sync/v3/root"
-	FileURLPrefix   = "https://internal.cloud.remarkable.com/sync/v3/files/"
+	RootURL       = "https://internal.cloud.remarkable.com/sync/v3/root"
+	FileURLPrefix = "https://internal.cloud.remarkable.com/sync/v3/files/"
 
 	DebugLogFunc func(string, ...interface{})
 
@@ -528,31 +519,6 @@ type contentDocTransform struct {
 	M31 float32 `json:"m31"`
 	M32 float32 `json:"m32"`
 	M33 float32 `json:"m33"`
-}
-
-type storageResp struct {
-	Expires            string `json:"expires"`
-	Method             string `json:"method"`
-	RelativePath       string `json:"relative_path"`
-	URL                string `json:"url"`
-	Error              string `json:"error"`
-	MaxuploadsizeBytes int    `json:"maxuploadsize_bytes"`
-}
-
-type storageRequest struct {
-	RelativePath string `json:"relative_path"`
-	Method       string `json:"http_method"`
-	Generation   int    `json:"generation,omitempty"`
-	RootSchema   string `json:"root_schema,omitempty"`
-}
-
-type syncCompleteRequest struct {
-	Generation int `json:"generation"`
-}
-
-type syncCompleteResponse struct {
-	Message    string `json:"message"`
-	StatusCode int    `json:"code"`
 }
 
 type blobMetadata struct {
