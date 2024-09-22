@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"strings"
@@ -42,4 +43,51 @@ func getBlobAction(cmd *cobra.Command, args []string) {
 	defer resp.Body.Close()
 
 	io.Copy(os.Stdout, resp.Body)
+}
+
+func getDocCommand() *cobra.Command {
+	cmd := cobra.Command{
+		Use:   "get <cloud_path> <local_dst>",
+		Short: "Get document by path",
+		Run:   getDocAction,
+	}
+
+	return &cmd
+}
+
+func getDocAction(cmd *cobra.Command, args []string) {
+	client, err := newClient()
+	if err != nil {
+		panic(err)
+	}
+
+	if len(args) < 2 {
+		log.Fatalf("usage: get <cloud_path> <local_dst>")
+	}
+
+	dstPath := args[1]
+	f, err := os.Create(dstPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	rootFS, err := client.FSSnapshot()
+	if err != nil {
+		log.Fatalf("get fs snapshot err: %s", err)
+	}
+
+	cloudPath := args[0]
+
+	content, err := fs.ReadFile(rootFS, cloudPath)
+	if err != nil {
+		log.Fatalf("read file err: %s", err)
+	}
+
+	_, err = f.Write(content)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Wrote: %s", dstPath)
 }

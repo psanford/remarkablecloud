@@ -25,6 +25,7 @@ func main() {
 	rootCmd.AddCommand(mkDirCommand())
 	rootCmd.AddCommand(rmCommand())
 	rootCmd.AddCommand(getBlobCommand())
+	rootCmd.AddCommand(getDocCommand())
 
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
 		if debugLog {
