@@ -419,7 +419,7 @@ func (b *Batch) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
 
 	items := raw.items
 
-	tree, err := b.c.fsSnapshotFromList(items)
+	tree, err := b.c.fsSnapshotFromList(items, false)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +524,7 @@ func (b *Batch) Mkdir(p string) (*PutResult, error) {
 
 	items := raw.items
 
-	tree, err := b.c.fsSnapshotFromList(items)
+	tree, err := b.c.fsSnapshotFromList(items, false)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +607,7 @@ func (b *Batch) Remove(name string) (*PutResult, error) {
 
 	items := raw.items
 
-	tree, err := b.c.fsSnapshotFromList(items)
+	tree, err := b.c.fsSnapshotFromList(items, false)
 	if err != nil {
 		return nil, err
 	}
@@ -724,5 +724,5 @@ func (b *Batch) FSSnapshot() (fs.FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return b.c.fsSnapshotFromList(items)
+	return b.c.fsSnapshotFromList(items, true)
 }

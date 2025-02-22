@@ -382,7 +382,7 @@ func (c *Client) FSSnapshot() (fs.FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.fsSnapshotFromList(items)
+	return c.fsSnapshotFromList(items, true)
 }
 
 const (

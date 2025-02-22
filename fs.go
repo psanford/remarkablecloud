@@ -11,7 +11,7 @@ import (
 	"github.com/psanford/memfs"
 )
 
-func (c *Client) fsSnapshotFromList(items []Item) (fs.FS, error) {
+func (c *Client) fsSnapshotFromList(items []Item, fullOpen bool) (fs.FS, error) {
 	seen := make(map[string]Item)
 	paths := make(map[string]string)
 
@@ -64,7 +64,10 @@ func (c *Client) fsSnapshotFromList(items []Item) (fs.FS, error) {
 		return origContent, origErr
 	}
 
-	rootFS := memfs.New(memfs.WithOpenHook(openHook))
+	rootFS := memfs.New()
+	if fullOpen {
+		rootFS = memfs.New(memfs.WithOpenHook(openHook))
+	}
 
 	prevSeen := len(seen)
 	for len(seen) < len(items) {
