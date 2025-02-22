@@ -315,7 +315,7 @@ func (c *Client) RawPutBlob(r RawPubBlobRequest, opts ...PutBlobOption) error {
 		return err
 	}
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("put blob non-200 response: %d %s", resp.StatusCode, body)
 	}
 
