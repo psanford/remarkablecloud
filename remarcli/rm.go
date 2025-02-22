@@ -24,8 +24,6 @@ func rmAction(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	fileName := args[0]
-
 	client, err := newClient()
 	if err != nil {
 		panic(err)
@@ -36,9 +34,12 @@ func rmAction(cmd *cobra.Command, args []string) {
 		log.Fatalf("new batch err: %s", err)
 	}
 
-	_, err = batcher.Remove(fileName)
-	if err != nil {
-		log.Fatalf("rm file err: %s", err)
+	for _, fileName := range args {
+		log.Printf("rm %s", fileName)
+		_, err = batcher.Remove(fileName)
+		if err != nil {
+			log.Fatalf("rm file err: %s", err)
+		}
 	}
 
 	result, err := batcher.Commit()
