@@ -489,7 +489,7 @@ func (b *Batch) Put(p string, ext string, r io.ReadSeeker) (*PutResult, error) {
 	}
 	files = append(files, *pd)
 
-	listingMeta, err := b.putListing(id, files)
+	listingMeta, err := b.putListing(id+".docSchema", files)
 	if err != nil {
 		return nil, fmt.Errorf("put listing err: %w", err)
 	}
